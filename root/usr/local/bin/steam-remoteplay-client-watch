@@ -1,0 +1,23 @@
+#!/bin/bash
+# Remember the screen size of the last Remote Play client for
+# GAMESCOPE_RESOLUTION=auto. Steam logs it on every stream start as
+# "CLIENT: Video size: ..., output size: 3000x2120, ...".
+STATE=/config/.local/state/steam-remoteplay
+LOCK="$STATE/client-watch.pid"
+mkdir -p "$STATE"
+if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK")" 2>/dev/null; then
+    exit 0
+fi
+echo $$ > "$LOCK"
+
+tail -n0 -F /config/.local/share/Steam/logs/streaming_log.txt 2>/dev/null \
+| grep --line-buffered -oE 'output size: [0-9]+x[0-9]+' \
+| while read -r _ _ size; do
+    w=${size%x*}; h=${size#*x}
+    [ "$h" -gt 0 ] 2>/dev/null || continue
+    # Steam streams at most 1080 lines by default: keep the client's aspect
+    # ratio at that height. NV12 capture needs an even width.
+    if [ "$h" -gt 1080 ]; then w=$(( w * 1080 / h )); h=1080; fi
+    new="$(( w / 2 * 2 ))x$h"
+    [ "$(cat "$STATE/last-client" 2>/dev/null)" = "$new" ] || echo "$new" > "$STATE/last-client"
+done

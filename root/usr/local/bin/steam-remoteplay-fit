@@ -1,0 +1,48 @@
+#!/bin/bash
+# Keep gamescope's window at the streaming size (usage: steam-remoteplay-fit W H).
+# gamescope streams at its window's size, and labwc squeezes a new window
+# into the web UI desktop, which is 1024x768 while no browser is connected.
+# labwc does allow a larger window through ResizeTo, so this adds a key
+# binding that resizes only gamescope's window (matched by app id) and
+# presses it: once gamescope is up, and at every Remote Play session start.
+W=$1; H=$2
+[ -n "$W" ] && [ -n "$H" ] || exit 1
+STATE=/config/.local/state/steam-remoteplay
+LOCK="$STATE/fit.pid"
+RC=/config/.config/labwc/rc.xml
+KEY="W-A-S-F12"
+mkdir -p "$STATE"
+# One instance watches the log; a later one (Steam restarted) only updates
+# the size in the binding and resizes once. Presses always use the size
+# currently in the binding.
+WATCH=1
+if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK")" 2>/dev/null; then
+    WATCH=""
+else
+    echo $$ > "$LOCK"
+fi
+
+if [ ! -w "$RC" ]; then
+    echo "steam-remoteplay-fit: $RC not writable, gamescope keeps the size labwc gives it" >&2
+    exit 0
+fi
+sed -i "/<keybind key=\"$KEY\">/d" "$RC"
+sed -i "s|</keyboard>|  <keybind key=\"$KEY\"><action name=\"ForEach\"><query identifier=\"gamescope\" /><then><action name=\"ResizeTo\" width=\"$W\" height=\"$H\" /><action name=\"MoveTo\" x=\"0\" y=\"0\" /></then></action></keybind>\n  </keyboard>|" "$RC"
+pkill -HUP -u "$(id -u)" -x labwc
+
+fit() { wtype -M logo -M alt -M shift -k F12 -m shift -m alt -m logo 2>/dev/null; }
+
+# Once gamescope's window is up.
+for _ in $(seq 1 60); do
+    [ -S "$XDG_RUNTIME_DIR/gamescope-0" ] && break
+    sleep 1
+done
+sleep 2; fit
+sleep 5; fit
+
+[ -n "$WATCH" ] || exit 0
+
+# At every Remote Play session start.
+tail -n0 -F /config/.local/share/Steam/logs/streaming_log.txt 2>/dev/null \
+| grep --line-buffered -E 'Streaming started' \
+| while read -r _; do fit; done

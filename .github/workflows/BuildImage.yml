@@ -1,64 +1,46 @@
 name: Build Image
 
+# Publishes the mod to ghcr.io/<owner>/docker-mods:steam-remoteplay
+# (for example DOCKER_MODS=ghcr.io/joly0/docker-mods:steam-remoteplay).
+# Weekly rebuild picks up new Debian gamescope sources; once Debian ships
+# gamescope >= 3.16.31 the image simply carries no patched package.
+
 on:
   push:
-  pull_request_target:
+    branches: [steam-remoteplay]
+  schedule:
+    - cron: "17 4 * * 1"
   workflow_dispatch:
-    inputs:
-      mod_version:
-        type: string
-        required: false
 
 env:
-  GITHUB_REPO: "linuxserver/docker-mods" #don't modify
-  ENDPOINT: "linuxserver/mods" #don't modify
-  BASEIMAGE: "replace_baseimage" #replace
-  MODNAME: "replace_modname" #replace
-  MOD_VERSION: ${{ inputs.mod_version }} #don't modify
-  MULTI_ARCH: "true" #set to false if not needed
+  MODNAME: "steam-remoteplay"
 
 jobs:
-  set-vars:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set Vars
-        id: outputs
-        run: |
-          echo "GITHUB_REPO=${{ env.GITHUB_REPO }}" >> $GITHUB_OUTPUT
-          echo "ENDPOINT=${{ env.ENDPOINT }}" >> $GITHUB_OUTPUT
-          echo "BASEIMAGE=${{ env.BASEIMAGE }}" >> $GITHUB_OUTPUT
-          echo "MODNAME=${{ env.MODNAME }}" >> $GITHUB_OUTPUT
-          echo "MULTI_ARCH=${{ env.MULTI_ARCH }}" >> $GITHUB_OUTPUT
-          if [[ -z "${{ env.MOD_VERSION }}" ]]; then
-            # **** If the mod needs to be versioned, set the versioning logic below. Otherwise leave as is. ****
-            MOD_VERSION=""
-          else
-            MOD_VERSION=${{ env.MOD_VERSION }}
-            echo "MOD_VERSION_OVERRIDE=true" >> $GITHUB_OUTPUT
-          fi
-          echo "MOD_VERSION=${MOD_VERSION}" >> $GITHUB_OUTPUT
-    outputs:
-      GITHUB_REPO: ${{ steps.outputs.outputs.GITHUB_REPO }}
-      ENDPOINT: ${{ steps.outputs.outputs.ENDPOINT }}
-      BASEIMAGE: ${{ steps.outputs.outputs.BASEIMAGE }}
-      MODNAME: ${{ steps.outputs.outputs.MODNAME }}
-      MULTI_ARCH: ${{ steps.outputs.outputs.MULTI_ARCH }}
-      MOD_VERSION: ${{ steps.outputs.outputs.MOD_VERSION }}
-      MOD_VERSION_OVERRIDE: ${{ steps.outputs.outputs.MOD_VERSION_OVERRIDE }}
-
   build:
-    uses: linuxserver/github-workflows/.github/workflows/docker-mod-builder.yml@v1
-    needs: set-vars
-    secrets:
-      CR_USER: ${{ secrets.CR_USER }}
-      CR_PAT: ${{ secrets.CR_PAT }}
-      DOCKERUSER: ${{ secrets.DOCKERUSER }}
-      DOCKERPASS: ${{ secrets.DOCKERPASS }}
-    with:
-      GITHUB_REPO: ${{ needs.set-vars.outputs.GITHUB_REPO }}
-      ENDPOINT: ${{ needs.set-vars.outputs.ENDPOINT }}
-      BASEIMAGE: ${{ needs.set-vars.outputs.BASEIMAGE }}
-      MODNAME: ${{ needs.set-vars.outputs.MODNAME }}
-      MULTI_ARCH: ${{ needs.set-vars.outputs.MULTI_ARCH }}
-      MOD_VERSION: ${{ needs.set-vars.outputs.MOD_VERSION }}
-      MOD_VERSION_OVERRIDE: ${{ needs.set-vars.outputs.MOD_VERSION_OVERRIDE }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}:${MODNAME}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.name.outputs.image }}
+            ${{ steps.name.outputs.image }}-${{ github.sha }}

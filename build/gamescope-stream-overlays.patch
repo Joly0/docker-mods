@@ -1,0 +1,24 @@
+--- a/src/steamcompmgr.cpp	2026-10-16 02:14:38.737676352 +0200
++++ b/src/steamcompmgr.cpp	2026-10-16 02:14:38.749676546 +0200
+@@ -2389,6 +2389,21 @@
+ 	if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
+ 		paint_window( pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
+ 
++	// Also stream the overlay layers the screen shows on top: mangoapp,
++	// Steam's overlay (performance information, in-game menus) and
++	// notifications, painted the way paint_all() paints them.
++	global_focus_t *pScreenFocus = GetCurrentFocus();
++	const uint32_t uOverlayAlphaFlag = cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0;
++	steamcompmgr_win_t *pExternalOverlay = pScreenFocus ? pScreenFocus->externalOverlayWindow : nullptr;
++	steamcompmgr_win_t *pSteamOverlay = pScreenFocus ? pScreenFocus->overlayWindow : nullptr;
++	steamcompmgr_win_t *pNotification = pScreenFocus ? pScreenFocus->notificationWindow : nullptr;
++	if ( pExternalOverlay && pExternalOverlay->opacity )
++		paint_window( pExternalOverlay, pExternalOverlay, &frameInfo, nullptr, PaintWindowFlag::NoScale | PaintWindowFlag::NoFilter | uOverlayAlphaFlag );
++	if ( pSteamOverlay && pSteamOverlay->opacity && pSteamOverlay != pFocus->focusWindow && pSteamOverlay != pFocus->overrideWindow )
++		paint_window( pSteamOverlay, pSteamOverlay, &frameInfo, nullptr, PaintWindowFlag::DrawBorders | PaintWindowFlag::NoFilter | uOverlayAlphaFlag );
++	if ( pNotification && pNotification->opacity )
++		paint_window( pNotification, pNotification, &frameInfo, nullptr, PaintWindowFlag::NotificationMode | PaintWindowFlag::NoFilter );
++
+ 	gamescope::Rc<CVulkanTexture> pRGBTexture = s_pPipewireBuffer->texture->isYcbcr()
+ 		? vulkan_acquire_screenshot_texture( uWidth, uHeight, false, DRM_FORMAT_XRGB2101010 )
+ 		: gamescope::Rc<CVulkanTexture>{ s_pPipewireBuffer->texture };

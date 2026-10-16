@@ -1,0 +1,155 @@
+#!/usr/bin/with-contenv bash
+
+# steam-remoteplay: make Steam Remote Play work from the linuxserver/steam
+# image (hardware encoding, controllers, Big Picture menus).
+# Runs as root after the shared package install and after the image has
+# generated its desktop configuration.
+#
+# Everything happens only with REMOTEPLAY=true. Without it the mod does
+# nothing and the container behaves exactly as the image ships it.
+
+log() { echo "**** [steam-remoteplay] $* ****"; }
+
+if [[ "${REMOTEPLAY,,}" != "true" ]]; then
+    log "inactive (set REMOTEPLAY=true to enable Steam Remote Play support)"
+    exit 0
+fi
+
+WRAPPER=/usr/bin/wrapped-steam
+if [ ! -f "$WRAPPER" ]; then
+    log "no $WRAPPER, this mod is meant for linuxserver/steam; skipping"
+    exit 0
+fi
+SHARE=/usr/share/steam-remoteplay
+DEST32=/usr/lib/i386-linux-gnu
+CACHE=/config/.cache/steam-remoteplay
+
+# ---------------------------------------------------------------------------
+# gamescope: replace Debian's build with the one shipped in this mod. It
+# streams the overlay layers (FPS, Steam's performance information,
+# notifications) and, for Debian versions before 3.16.31, carries the
+# upstream fixes against black frames and swapped colours (gamescope #2271).
+# ---------------------------------------------------------------------------
+if dpkg -s gamescope >/dev/null 2>&1; then
+    have=$(dpkg-query -W -f '${Version}' gamescope)
+    deb=$(ls "$SHARE"/gamescope_*_amd64.deb 2>/dev/null | tail -n1)
+    if [ -n "$deb" ]; then
+        want=$(dpkg-deb -f "$deb" Version)
+        if [ "$want" != "$have" ]; then
+            log "installing patched gamescope $want (was $have)"
+            dpkg -i "$deb" || log "WARNING: patched gamescope did not install"
+        fi
+    elif dpkg --compare-versions "${have%%+*}" lt 3.16.31; then
+        log "WARNING: gamescope $have streams black frames on NVIDIA and no patched build is bundled"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# NVIDIA: Steam's streaming encoder runs in its 32-bit client, but the NVIDIA
+# container runtime only injects 64-bit driver libraries. Without the 32-bit
+# ones Steam falls back to VAAPI and crashes with hardware encoding on.
+# Source, in order: REMOTEPLAY_NVIDIA_LIB32 (a host folder with the 32-bit
+# libraries mounted into the container), a cached copy, a one-time download
+# of the matching driver package from download.nvidia.com.
+# ---------------------------------------------------------------------------
+link_nvidia32() {
+    local src=$1 f n=0
+    for f in "$src"/lib*.so."$NV_VER"; do
+        [ -e "$f" ] || continue
+        [ "$(od -An -tx1 -j4 -N1 "$f" 2>/dev/null | tr -d ' ')" = "01" ] || continue  # ELF class 32
+        [ -e "$DEST32/$(basename "$f")" ] || ln -s "$f" "$DEST32/$(basename "$f")"
+        n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] && ldconfig 2>/dev/null
+    echo "$n"
+}
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    NV_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')
+fi
+if [ -n "$NV_VER" ]; then
+    if [ -e "$DEST32/libGLX_nvidia.so.$NV_VER" ] && [ -e "$DEST32/libnvidia-encode.so.$NV_VER" ]; then
+        log "32-bit NVIDIA libraries $NV_VER present"
+    else
+        done32=""
+        if [ -n "$REMOTEPLAY_NVIDIA_LIB32" ] && [ -e "$REMOTEPLAY_NVIDIA_LIB32/libGLX_nvidia.so.$NV_VER" ]; then
+            n=$(link_nvidia32 "$REMOTEPLAY_NVIDIA_LIB32")
+            [ "$n" -gt 0 ] && done32=1 && log "linked $n 32-bit NVIDIA libraries from $REMOTEPLAY_NVIDIA_LIB32"
+        fi
+        if [ -z "$done32" ] && [ ! -e "$CACHE/nvidia-$NV_VER/libGLX_nvidia.so.$NV_VER" ]; then
+            url="https://download.nvidia.com/XFree86/Linux-x86_64/$NV_VER/NVIDIA-Linux-x86_64-$NV_VER.run"
+            tmp=$(mktemp -d /tmp/nvidia32.XXXXXX)
+            log "downloading NVIDIA driver $NV_VER once to extract its 32-bit libraries"
+            if curl -fsSL -o "$tmp/nv.run" "$url" \
+                && sh "$tmp/nv.run" --extract-only --target "$tmp/x" >/dev/null 2>&1 \
+                && [ -d "$tmp/x/32" ]; then
+                mkdir -p "$CACHE/nvidia-$NV_VER"
+                cp -a "$tmp/x/32/"lib*.so."$NV_VER" "$CACHE/nvidia-$NV_VER/"
+                chown -R abc:abc "$CACHE"
+            else
+                log "WARNING: could not get 32-bit NVIDIA libraries from $url"
+            fi
+            rm -r "$tmp"
+        fi
+        if [ -z "$done32" ] && [ -e "$CACHE/nvidia-$NV_VER/libGLX_nvidia.so.$NV_VER" ]; then
+            n=$(link_nvidia32 "$CACHE/nvidia-$NV_VER")
+            [ "$n" -gt 0 ] && done32=1 && log "linked $n cached 32-bit NVIDIA libraries ($NV_VER)"
+        fi
+        [ -n "$done32" ] || log "WARNING: no 32-bit NVIDIA libraries; turn hardware encoding off in Steam"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Controllers: Steam turns a Remote Play controller into a virtual gamepad
+# through /dev/uinput. The pad appears in the host's /dev/input (mounted in),
+# owned by the host's input group.
+# ---------------------------------------------------------------------------
+if [ -e /dev/uinput ]; then
+    chmod 666 /dev/uinput
+    log "uinput writable"
+fi
+input_gid=$(stat -c %g /dev/input/event* 2>/dev/null | sort -n | uniq -c | sort -rn | awk 'NR==1{print $2}')
+if [ -n "$input_gid" ] && [ "$input_gid" != "0" ]; then
+    getent group "$input_gid" >/dev/null || groupadd -g "$input_gid" hostinput
+    usermod -aG "$(getent group "$input_gid" | cut -d: -f1)" abc
+    log "abc added to input group $input_gid"
+fi
+
+# Remote Play controllers need the browser gamepads off (NO_GAMEPAD).
+# With /dev/input mounted from the host and NO_GAMEPAD unset, the image
+# has already written its virtual browser gamepads into the HOST's
+# /dev/input, so say so loudly.
+if [[ -z ${NO_GAMEPAD+x} ]] && mountpoint -q /dev/input; then
+    log "WARNING: /dev/input is mounted from the host but NO_GAMEPAD is not set"
+    log "WARNING: the image created its virtual browser gamepads in the host's /dev/input"
+    log "WARNING: set NO_GAMEPAD=true for Remote Play controllers"
+fi
+if [[ -n ${NO_GAMEPAD+x} ]]; then
+    # The Steam launcher always preloads selkies' input interposer and fake
+    # libudev, which hide every real controller from Steam and from games.
+    sed -i 's|^export LD_PRELOAD="${STEAM_PRELOAD}"$|unset LD_PRELOAD|' "$WRAPPER"
+    # SDL in Steam and in games cannot use udev in the container; watch
+    # /dev/input directly so pads created later are found.
+    if [ -z "${SDL_JOYSTICK_DISABLE_UDEV+x}" ]; then
+        printf '1' > /run/s6/container_environment/SDL_JOYSTICK_DISABLE_UDEV
+    fi
+    log "browser gamepads off (NO_GAMEPAD), Remote Play controllers prepared"
+fi
+
+# ---------------------------------------------------------------------------
+# Big Picture menus over Remote Play: Steam runs inside gamescope, whose
+# composited output Remote Play captures. The desktop must not maximize
+# gamescope's window, because the stream takes the window's size.
+# ---------------------------------------------------------------------------
+if [ -x /usr/games/gamescope ]; then
+    RC=/config/.config/labwc/rc.xml
+    if [ -f "$RC" ] && [ -w "$RC" ]; then
+        sed -i '/<windowRule identifier="\*"><action name="Maximize" \/><\/windowRule>/d' "$RC"
+    fi
+    if ! grep -q 'steam-remoteplay-gamescope' "$WRAPPER"; then
+        sed -i 's|^\${TERMINAL} -e /usr/bin/steam |exec /usr/local/bin/steam-remoteplay-gamescope "$@"\n&|' "$WRAPPER"
+    fi
+    log "Steam will start in Big Picture inside gamescope (${GAMESCOPE_RESOLUTION:-auto})"
+else
+    log "WARNING: gamescope is not installed, Big Picture menus will stream black"
+fi

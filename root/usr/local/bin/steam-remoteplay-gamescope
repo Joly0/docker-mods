@@ -1,0 +1,67 @@
+#!/bin/bash
+# Start Steam's Big Picture inside a nested gamescope, so Remote Play
+# captures gamescope's composited output (menus with background) through
+# PipeWire. Exec'd by /usr/bin/wrapped-steam (patched by steam-remoteplay).
+#
+# GAMESCOPE_RESOLUTION   size Steam renders and streams at
+#   auto (default)       the screen of the last Remote Play client, applied
+#                        from the next Steam start on (first start: 1920x1080)
+#   WxH                  fixed, e.g. 1920x1080 (16:9) or 2520x1080 (21:9)
+
+STATE=/config/.local/state/steam-remoteplay
+LAST="$STATE/last-client"
+
+# wrapped-steam has already set LD_PRELOAD for Steam: the browser-gamepad
+# interposer, or nothing when NO_GAMEPAD is set. Keep exactly that for
+# Steam, and keep it away from gamescope and PipeWire.
+STEAM_LD_PRELOAD="${LD_PRELOAD-}"
+for f in /run/s6/container_environment/*; do
+    export "$(basename "$f")=$(cat "$f")"
+done
+unset LD_PRELOAD
+export HOME=/config XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/config/.XDG}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" DISPLAY="${DISPLAY:-:0}"
+
+# Steam and PipeWire share this D-Bus session.
+eval "$(dbus-launch --sh-syntax)"
+pgrep -u "$(id -u)" -x pipewire >/dev/null || { pipewire >/tmp/pipewire.log 2>&1 & sleep 1; }
+pgrep -u "$(id -u)" -x wireplumber >/dev/null || { wireplumber >/tmp/wireplumber.log 2>&1 & }
+
+RES="${GAMESCOPE_RESOLUTION:-auto}"
+if [ "${RES,,}" = "auto" ]; then
+    mkdir -p "$STATE"
+    RES=$(cat "$LAST" 2>/dev/null)
+    [[ "$RES" =~ ^[0-9]+x[0-9]+$ ]] || RES=1920x1080
+    steam-remoteplay-client-watch &
+fi
+if ! [[ "$RES" =~ ^[0-9]+x[0-9]+$ ]]; then
+    echo "steam-remoteplay: invalid GAMESCOPE_RESOLUTION '$RES', using 1920x1080" >&2
+    RES=1920x1080
+fi
+W=$(( ${RES%x*} / 2 * 2 )); H=${RES#*x}   # NV12 capture needs an even width
+
+steam-remoteplay-fit "$W" "$H" &
+
+# FPS counter: Steam draws its in-game FPS counter through its desktop
+# overlay, which does not exist inside gamescope. Follow Steam's own
+# setting (Settings > In Game > In-game FPS counter) instead and let
+# mangoapp show the FPS, nothing else, in the chosen corner.
+MANGOAPP=()
+if command -v mangoapp >/dev/null; then
+    corner=$(grep -hoE '"InGameOverlayShowFPSCorner"[[:space:]]+"[0-9]+"' \
+        $(ls -t /config/.local/share/Steam/userdata/*/config/localconfig.vdf 2>/dev/null | head -n1) \
+        2>/dev/null | grep -oE '[0-9]+"$' | tr -d '"')
+    case "$corner" in
+        1) pos=top-left ;; 2) pos=top-right ;; 3) pos=bottom-right ;; 4) pos=bottom-left ;; *) pos="" ;;
+    esac
+    if [ -n "$pos" ]; then
+        mkdir -p "$STATE"
+        printf 'fps_only\nposition=%s\n' "$pos" > "$STATE/mangohud.conf"
+        export MANGOHUD_CONFIGFILE="$STATE/mangohud.conf"
+        MANGOAPP=(--mangoapp)
+    fi
+fi
+
+exec /usr/games/gamescope -W "$W" -H "$H" -w "$W" -h "$H" -r 60 -e "${MANGOAPP[@]}" --backend wayland \
+    -- env LD_PRELOAD="$STEAM_LD_PRELOAD" /usr/bin/steam -gamepadui -pipewire "$@" \
+    >/tmp/gamescope.log 2>&1
