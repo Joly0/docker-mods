@@ -36,7 +36,7 @@ For Remote Play:
 | Setting | Why |
 |---|---|
 | Own LAN IP (macvlan, e.g. Unraid `br0`/`eth0`) or `network_mode: host` | Remote Play finds the host by LAN broadcast and connects directly. Behind Docker's NAT bridge it falls back to Valve's relay, which times out. |
-| NVIDIA GPU passed through as for the image (`--gpus all` / `--runtime nvidia`) | Hardware encoding (NVENC). |
+| NVIDIA GPU passed through as described in linuxserver's [GPU guide](https://docs.linuxserver.io/selkies/user-guide/gpu/#nvidia-proprietary-drivers) (e.g. `--gpus all`, `--runtime nvidia`, device `/dev/nvidia-modeset`) | Hardware encoding (NVENC). |
 
 For controllers (all four together):
 
@@ -55,7 +55,53 @@ hardware encoding** on.
 | Variable | Default | Meaning |
 |---|---|---|
 | `GAMESCOPE_RESOLUTION` | `auto` | Size Steam renders and streams at. `auto`: the screen of the last connected client, applied from the next Steam start on (1920x1080 until a client has connected). `WxH` for a fixed size, e.g. `2520x1080` for a 21:9 phone. |
-| `REMOTEPLAY_NVIDIA_LIB32` | (unset) | Container path of the host's 32-bit NVIDIA libraries, if you mount them (Unraid: host `/usr/lib` read-only to e.g. `/host-lib32`). Without it the mod downloads the matching NVIDIA driver once (about 420 MB, first start only) and keeps its 32-bit libraries in `/config/.cache/steam-remoteplay`. |
+| `REMOTEPLAY_NVIDIA_LIB32` | (unset) | Path **inside the container** where the host's 32-bit NVIDIA libraries are mounted. Only works together with a volume, see below. |
+
+### 32-bit NVIDIA libraries
+
+Steam's Remote Play encoder runs in Steam's 32-bit client and needs the
+32-bit NVIDIA driver libraries, which the NVIDIA container runtime does not
+provide. The mod gets them one of two ways:
+
+1. **Download (default, nothing to set up):** on the first start the mod
+   downloads the NVIDIA driver package matching the host driver (about
+   420 MB) and keeps only its 32-bit libraries in
+   `/config/.cache/steam-remoteplay`. After a driver update on the host it
+   downloads once more.
+2. **From the host (no download):** mount the host folder that holds the
+   32-bit NVIDIA libraries read-only into the container **and** point
+   `REMOTEPLAY_NVIDIA_LIB32` at that mount. Both are needed: the variable
+   alone does nothing.
+
+   | Host | 32-bit NVIDIA libraries are in |
+   |---|---|
+   | Unraid (Nvidia Driver plugin) | `/usr/lib` |
+   | Debian, Ubuntu | `/usr/lib/i386-linux-gnu` |
+   | Arch (`lib32-nvidia-utils`) | `/usr/lib32` |
+
+   The folder must contain `libGLX_nvidia.so.<driver version>` (check with
+   `ls <folder> | grep libGLX_nvidia`).
+
+   Unraid template: add a **Path** with Container Path `/host-lib32`, Host
+   Path `/usr/lib`, Access Mode **Read Only**, and a **Variable**
+   `REMOTEPLAY_NVIDIA_LIB32` = `/host-lib32`.
+
+   `docker run`:
+   ```
+   -v /usr/lib:/host-lib32:ro -e REMOTEPLAY_NVIDIA_LIB32=/host-lib32
+   ```
+
+   Compose:
+   ```yaml
+   volumes:
+     - /usr/lib:/host-lib32:ro
+   environment:
+     - REMOTEPLAY_NVIDIA_LIB32=/host-lib32
+   ```
+
+   Replace `/usr/lib` with the folder for your host from the table. If the
+   folder does not hold libraries of the running driver version, the mod
+   falls back to the download.
 
 ## What it does at container start (with `REMOTEPLAY=true`)
 
