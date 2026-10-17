@@ -1,0 +1,196 @@
+#!/usr/bin/with-contenv bash
+
+# orcaslicer-mcp: replace OrcaSlicer in linuxserver/orcaslicer with the
+# OrcaSlicer MCP build (https://github.com/MaxEllis/OrcaSlicer), switch on its
+# Remote API and, unless ORCA_MCP_SERVER=false, prepare the MCP server
+# (https://github.com/MaxEllis/orcaslicer-mcp) that svc-mod-orcaslicer-mcp runs.
+# Runs as root after the shared package install, before OrcaSlicer starts.
+
+log() { echo "**** [orcaslicer-mcp] $* ****"; }
+
+APP=/opt/orcaslicer
+STOCK=/opt/orcaslicer-stock
+CACHE=/config/.cache/orcaslicer-mcp
+CONF=/config/.config/OrcaSlicer/OrcaSlicer.conf
+REPO=MaxEllis/OrcaSlicer
+SHARE=/usr/local/share/orcaslicer-mcp
+
+if [ ! -e "$APP/AppRun" ] && [ ! -L "$APP" ]; then
+    log "no $APP, this mod is meant for linuxserver/orcaslicer; skipping"
+    exit 0
+fi
+
+case "$(uname -m)" in
+    x86_64) ARCH=x64 ;;
+    aarch64) ARCH=aarch64 ;;
+    *) log "unsupported architecture $(uname -m); skipping"; exit 0 ;;
+esac
+
+mkdir -p "$CACHE/app"
+# A fresh /config gets .cache from here; it belongs to abc like the rest.
+lsiown abc:abc /config/.cache "$CACHE" 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# OrcaSlicer MCP build: ORCA_MCP_VERSION picks a release tag of the fork
+# (e.g. v2.4.2-mcp.13), default the latest release. Each version is extracted
+# once into /config, so a restart or a recreated container needs no download
+# and the docker image does not grow.
+# ---------------------------------------------------------------------------
+gh_api() {
+    curl -fsSL --retry 2 --connect-timeout 10 \
+        ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+        "https://api.github.com/repos/$REPO/releases/$1"
+}
+
+WANT="${ORCA_MCP_VERSION:-latest}"
+if [ "${WANT,,}" = "latest" ]; then
+    RELEASE=$(gh_api latest 2>/dev/null)
+else
+    RELEASE=$(gh_api "tags/$WANT" 2>/dev/null)
+fi
+TAG=$(jq -r '.tag_name // empty' <<<"$RELEASE" 2>/dev/null)
+
+if [ -z "$TAG" ]; then
+    # GitHub unreachable or rate limited: keep using what is cached.
+    if [ "${WANT,,}" = "latest" ]; then
+        TAG=$(ls -t "$CACHE/app" 2>/dev/null | head -n1)
+    elif [ -x "$CACHE/app/$WANT/AppRun" ]; then
+        TAG=$WANT
+    fi
+    if [ -n "$TAG" ]; then
+        log "could not look up release '$WANT' on GitHub, using cached $TAG"
+    fi
+fi
+
+if [ -n "$TAG" ] && [ ! -x "$CACHE/app/$TAG/AppRun" ]; then
+    ASSET="OrcaSlicer-MCP-${TAG#v}-linux-$ARCH.AppImage"
+    URL=$(jq -r --arg n "$ASSET" '.assets[] | select(.name == $n) | .browser_download_url' <<<"$RELEASE")
+    SUMS=$(jq -r '.assets[] | select(.name == "SHA256SUMS.txt") | .browser_download_url' <<<"$RELEASE")
+    TMP="$CACHE/download"
+    rm -rf "$TMP" && mkdir -p "$TMP"
+    if [ -z "$URL" ]; then
+        log "WARNING: release $TAG has no $ASSET"
+    else
+        log "downloading OrcaSlicer MCP build $TAG"
+        if curl -fsSL --retry 2 -o "$TMP/orca.AppImage" "$URL"; then
+            ok=1
+            if [ -n "$SUMS" ] && curl -fsSL -o "$TMP/SHA256SUMS.txt" "$SUMS"; then
+                want_sum=$(awk -v n="$ASSET" '$2 == n || $2 == "*"n {print $1}' "$TMP/SHA256SUMS.txt")
+                have_sum=$(sha256sum "$TMP/orca.AppImage" | cut -d' ' -f1)
+                if [ -z "$want_sum" ] || [ "$want_sum" != "$have_sum" ]; then
+                    log "WARNING: checksum of $ASSET does not match SHA256SUMS.txt, not using it"
+                    ok=""
+                fi
+            else
+                log "WARNING: no SHA256SUMS.txt for $TAG, the download is not verified"
+            fi
+            if [ -n "$ok" ]; then
+                chmod +x "$TMP/orca.AppImage"
+                if (cd "$TMP" && ./orca.AppImage --appimage-extract >/dev/null 2>&1) \
+                    && [ -x "$TMP/squashfs-root/AppRun" ]; then
+                    # The fork ships its directories as 0700; OrcaSlicer runs as abc.
+                    chmod -R u+rwX,go+rX,go-w "$TMP/squashfs-root"
+                    chmod +x "$TMP/squashfs-root/libexec/orca-slicer-env" 2>/dev/null
+                    mv "$TMP/squashfs-root" "$CACHE/app/$TAG"
+                else
+                    log "WARNING: could not extract $ASSET"
+                fi
+            fi
+        else
+            log "WARNING: download of $ASSET failed"
+        fi
+    fi
+    rm -rf "$TMP"
+    if [ ! -x "$CACHE/app/$TAG/AppRun" ]; then
+        old=$(ls -t "$CACHE/app" 2>/dev/null | grep -vx "$TAG" | head -n1)
+        if [ -n "$old" ]; then
+            log "falling back to cached $old"
+        fi
+        TAG=$old
+    fi
+fi
+
+if [ -z "$TAG" ]; then
+    log "WARNING: no OrcaSlicer MCP build available, starting the stock OrcaSlicer"
+    exit 0
+fi
+
+# Keep only the version in use.
+for d in "$CACHE/app"/*; do
+    [ "$(basename "$d")" = "$TAG" ] || rm -rf "$d"
+done
+touch "$CACHE/app/$TAG"
+
+# /opt/orcaslicer is where the image's autostart and menu start OrcaSlicer.
+if [ -d "$APP" ] && [ ! -L "$APP" ]; then
+    rm -rf "$STOCK"
+    mv "$APP" "$STOCK"
+fi
+ln -sfn "$CACHE/app/$TAG" "$APP"
+log "OrcaSlicer MCP build $TAG installed"
+
+# ---------------------------------------------------------------------------
+# Remote API: on, with port, LAN binding and token from the environment when
+# set. OrcaSlicer reads these from its config at start, which is after this
+# script. A fresh /config has no config yet: OrcaSlicer writes it during its
+# setup wizard, so the API is switched on from the next container start.
+# ---------------------------------------------------------------------------
+if [ -f "$CONF" ]; then
+    jq_args=(--arg port "${ORCA_API_PORT:-}" --arg lan "${ORCA_API_BIND_LAN,,}" --arg token "${ORCA_API_TOKEN:-}")
+    filter='.app.remote_api_enabled = true
+        | if $port != "" then .app.remote_api_port = $port else . end
+        | if $lan == "true" then .app.remote_api_bind_lan = true
+          elif $lan == "false" then .app.remote_api_bind_lan = false else . end
+        | if $token != "" then .app.remote_api_token = $token else . end'
+    if jq "${jq_args[@]}" "$filter" "$CONF" > "$CONF.orcaslicer-mcp" 2>/dev/null; then
+        cat "$CONF.orcaslicer-mcp" > "$CONF"
+        log "Remote API enabled on port $(jq -r '.app.remote_api_port // "13130"' "$CONF")$( \
+            [ "$(jq -r '.app.remote_api_bind_lan // false' "$CONF")" = "true" ] && echo ", reachable from the LAN" || echo ", localhost only")"
+    else
+        log "WARNING: could not parse $CONF, enable the Remote API in OrcaSlicer's Preferences"
+    fi
+    rm -f "$CONF.orcaslicer-mcp"
+else
+    log "OrcaSlicer has no config yet: finish its setup wizard, then restart the container to enable the Remote API"
+fi
+
+# ---------------------------------------------------------------------------
+# MCP server inside the container (svc-mod-orcaslicer-mcp), unless
+# ORCA_MCP_SERVER=false. ORCA_MCP_SERVER_VERSION pins the PyPI version.
+# ---------------------------------------------------------------------------
+if [[ "${ORCA_MCP_SERVER,,}" == "false" ]]; then
+    log "MCP server inside the container disabled (ORCA_MCP_SERVER=false)"
+    exit 0
+fi
+
+VENV="$CACHE/server"
+export UV_CACHE_DIR="$CACHE/uv-cache" UV_PYTHON_INSTALL_DIR="$CACHE/python"
+PKG="orcaslicer-mcp${ORCA_MCP_SERVER_VERSION:+==${ORCA_MCP_SERVER_VERSION}}"
+
+server_ok() { "$VENV/bin/python" -c 'import orcaslicer_mcp.server, uvicorn' >/dev/null 2>&1; }
+
+if ! server_ok; then
+    rm -rf "$VENV"
+    "$SHARE/uv" venv -q --python '>=3.11' "$VENV" || log "WARNING: could not create a Python environment"
+fi
+if "$SHARE/uv" pip install -q --python "$VENV/bin/python" --upgrade "$PKG" uvicorn; then
+    log "MCP server $("$VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("orcaslicer-mcp"))') ready"
+elif server_ok; then
+    log "WARNING: could not update the MCP server, using the installed one"
+else
+    log "WARNING: MCP server could not be installed"
+fi
+
+# Bearer token clients send to the MCP server: ORCA_MCP_SERVER_TOKEN, or one
+# generated once and kept in /config.
+TOKEN_FILE=/config/.config/orcaslicer-mcp/server-token
+if [ -z "$ORCA_MCP_SERVER_TOKEN" ] && [ ! -s "$TOKEN_FILE" ]; then
+    s6-setuidgid abc mkdir -p "$(dirname "$TOKEN_FILE")"
+    (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$TOKEN_FILE")
+fi
+if [ -z "$ORCA_MCP_SERVER_TOKEN" ]; then
+    log "MCP server bearer token is in $TOKEN_FILE (the appdata folder on the host)"
+fi
+
+lsiown -R abc:abc "$CACHE/server" "$CACHE/uv-cache" "$CACHE/python" /config/.config/orcaslicer-mcp 2>/dev/null
+exit 0

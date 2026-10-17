@@ -1,0 +1,15 @@
+#!/usr/bin/with-contenv bash
+
+# MCP server for the OrcaSlicer MCP build, served over streamable HTTP at
+# http://<container>:${ORCA_MCP_SERVER_PORT:-13131}/mcp and protected by a
+# bearer token. Off with ORCA_MCP_SERVER=false.
+
+VENV=/config/.cache/orcaslicer-mcp/server
+
+if [[ "${ORCA_MCP_SERVER,,}" == "false" ]] || [ ! -x "$VENV/bin/python" ]; then
+    exec s6-svc -Od .
+fi
+
+export HOME=/config
+exec \
+    s6-setuidgid abc "$VENV/bin/python" /usr/local/share/orcaslicer-mcp/http_server.py

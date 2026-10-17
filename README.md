@@ -1,308 +1,125 @@
-# Intro
+# OrcaSlicer MCP - Docker mod for orcaslicer
 
-The purpose of the repository is to provide examples and guidance in creating and storing a user consumable modification layer for the Library of Linuxserver.io Containers.
-At its core a Docker Mod is a tarball of files stored on Dockerhub and/or GitHub Container Registry that is downloaded and extracted on container boot before any init logic is run.
-This allows:
+This mod turns [linuxserver/orcaslicer](https://github.com/linuxserver/docker-orcaslicer)
+into an OrcaSlicer an AI assistant can work with through
+[orcaslicer-mcp](https://github.com/MaxEllis/orcaslicer-mcp): load models,
+change settings, slice and read the result back, while you watch the same
+OrcaSlicer in the browser.
 
-* Developers and community users to modify base containers to suit their needs without the need to maintain a fork of the main docker repository
-* Mods to be shared with the Linuxserver.io userbase as individual independent projects with their own support channels and development ideologies
-* Zero cost hosting and build pipelines for these modifications leveraging GitHub Container Registry and Dockerhub
-* Full custom configuration management layers for hooking containers into each other using environment variables contained in a compose file
+Stock OrcaSlicer has no control API, so the mod replaces it with the
+[OrcaSlicer MCP build](https://github.com/MaxEllis/OrcaSlicer/releases) (the
+same OrcaSlicer plus a token-protected local API), switches that API on, and
+runs the MCP server inside the container, reachable over HTTP.
 
-It is important to note to end users of this system that there are not only extreme security implications to consuming files from sources outside of our control, but by leveraging community Mods you essentially lose direct support from the core LinuxServer team. Our first and foremost troubleshooting step will be to remove the `DOCKER_MODS` environment variable when running into issues and replace the container with a clean LSIO one.
+## Usage
 
-Again, when pulling in logic from external sources practice caution and trust the sources/community you get them from.
+Set this environment variable on the orcaslicer container and map the MCP
+server's port:
 
-## LinuxServer.io Hosted Mods
-
-We host and publish official Mods at the [linuxserver/mods](https://github.com/orgs/linuxserver/packages/container/mods/versions) endpoint as separate tags. Each tag is in the format of `<imagename>-<modname>` for the latest versions, and `<imagename>-<modname>-<commitsha>` for the specific versions.
-
-Here's a list of the official Mods we host: [https://mods.linuxserver.io/](https://mods.linuxserver.io/)
-
-## Using a Docker Mod
-
-Before consuming a Docker Mod ensure that the source code for it is publicly posted along with its build pipeline pushing to Dockerhub.
-
-Consumption of a Docker Mod is intended to be as user friendly as possible and can be achieved with the following environment variables being passed to the container:
-
-* DOCKER_MODS- This can be a single endpoint `user/endpoint:tag` or an array of endpoints separated by `|` `user/endpoint:tag|user2/endpoint2:tag`
-* RUN_BANNED_MODS- If this is set to any value you will bypass our centralized filter of banned Dockerhub users and run Mods regardless of a ban
-
-Full example:
-
-docker run
-
-```bash
-docker create \
-  --name=nzbget \
-  -e DOCKER_MODS=lscr.io/linuxserver/mods:universal-tshoot \
-  -e PUID=1000 \
-  -e PGID=1000 \
-  -e TZ=Europe/London \
-  -p 6789:6789 \
-  -v /path/to/nzbget/data:/config \
-  -v /path/to/downloads:/downloads \
-  --restart unless-stopped \
-  lscr.io/linuxserver/nzbget
+```
+DOCKER_MODS=ghcr.io/joly0/docker-mods:orcaslicer-mcp
+-p 13131:13131
 ```
 
- docker compose
-
-```yaml
----
-services:
-  nzbget:
-    image: lscr.io/linuxserver/nzbget:latest
-    container_name: nzbget
-    environment:
-      - DOCKER_MODS=lscr.io/linuxserver/mods:universal-tshoot
-      - PUID=1000
-      - PGID=1000
-      - TZ=Europe/London
-    volumes:
-      - /path/to/nzbget/data:/config
-      - /path/to/downloads:/downloads #optional
-    ports:
-      - 6789:6789
-    restart: unless-stopped
-```
-
-This will spin up an nzbget container and apply the custom logic found in the following repository:
-
-[https://github.com/linuxserver/docker-mods/tree/universal-tshoot](https://github.com/linuxserver/docker-mods/tree/universal-tshoot)
-
-This mod installs some basic troubleshooting tools such as dig, netstat, nslookup, etc.
-
-## Creating and maintaining a Docker Mod
-
-**All of the example files referenced in this section are available in the [template](https://github.com/linuxserver/docker-mods/tree/template) branch of this repo.**
-
-We will always recommend to our users consuming Mods that they leverage ones from active community members or projects so transparency is key here. We understand that image layers can be pushed on the back end behind these pipelines, but every little bit helps. In this repository we will be going over two basic methods of making a Mod along with an example of the GitHub Actions build logic to get this into a Dockerhub and/or GitHub Container Registry endpoint. Though we are not officially endorsing GitHub Actions here it is built in to GitHub repositories and forks making it very easy to get started. If you prefer others feel free to use them as long as build jobs are transparent.
-
-> **Note**
-> One of the core ideas to remember when creating a Mod is that it can only contain a **single image layer**, the examples below will show you how to add files standardly and how to run complex logic to assemble the files in a build layer to copy them over into this single layer.
-
-### Mod Types
-
-We now only support s6 v3 mods. All currently supported Linuxserver base images are using s6 v3, however, older pinned images, forked versions, etc. may still be using v2. New mods will not work with older s6 v2 based images.
-
-### Docker Mod Simple - just add scripts
-
-In this repository you will find the `Dockerfile` containing:
-
-```Dockerfile
-FROM scratch
-
-# copy local files
-COPY root/ /
-```
-
-For most users this will suffice and anything in the root/ folder of the repository will be added to the end users Docker container / path.
-
-#### New (v3) mods
-
-The most common paths to leverage for Linuxserver images are as follows. Assuming a mod name of `universal-mymod`:
-
-```text
-.
-└── root
-  ├── defaults                                -- Any default config files you need to copy as part of the mod can be placed here
-  └── etc
-    └── s6-overlay
-      └── s6-rc.d
-        ├── init-mods-end
-        │  └── dependencies.d
-        │     └── init-mod-universal-mymod    -- If your mod does not need to install packages it should be a dependency of init-mods-end (empty file)
-        ├── init-mods-package-install
-        │  └── dependencies.d
-        │     └── init-mod-universal-mymod    -- If your mod needs to install packages it should be a dependency of init-mods-package-install (empty file)
-        ├── init-mod-universal-mymod
-        │  ├── dependencies.d
-        │  │  └── init-mods                   -- Tells our init logic that this depends on the `init-mods` step (empty file)
-        │  ├── run                            -- This is the init logic script that runs before the services in the container. Use `chmod +x` to set proper permissions.
-        │  ├── type                           -- This should contain the string `oneshot`.
-        │  └── up                             -- This should contain the absolute path to `run` e.g. `/etc/s6-overlay/s6-rc.d/init-mod-universal-mymod/run`.
-        ├── svc-mod-universal-mymod
-        │  ├── dependencies.d
-        │  │  └── init-services               -- Tells our init logic that this depends on the `init-services` step (empty file)
-        │  ├── run                            -- This is the script that runs in the foreground for persistent services. Use `chmod +x` to set proper permissions.
-        │  └── type                           -- This should contain the string `longrun`.
-        └── user
-          └── contents.d
-            ├── init-mod-universal-mymod      -- Tells our init logic that we need this directory (empty file)
-            └── svc-mod-universal-mymod       -- Tells our init logic that we need this directory (empty file)
-```
-
-> **Note**
-> For `oneshot` scripts you can alternatively omit the `run` file entirely and use the [execlineb](https://skarnet.org/software/execline/execlineb.html) syntax in `up` if your requirements are simple enough.
-
-#### Installing Packages
-
-v3 mods make use of a single package install process for all mods to minimise the amount of calls to external endpoints and speed up the mod init process. If you need to install repo packages you should append them to `/mod-repo-packages-to-install.list` for repo packages or `/mod-pip-packages-to-install.list` for pip packages and the mod handler will install them for you. Make sure to handle both Ubuntu and Alpine package names if your mod needs to support both e.g.
-
-```bash
-#!/usr/bin/with-contenv bash
-
-## Ubuntu
-if [ -f /usr/bin/apt ]; then
-    echo "\
-        dnsutils \
-        net-tools \
-        iputils-ping \
-        traceroute" >> /mod-repo-packages-to-install.list
-
-fi
-# Alpine
-if [ -f /sbin/apk ]; then
-    echo "\
-        bind-tools \
-        net-tools" >> /mod-repo-packages-to-install.list
-fi
-```
-
-If your mod needs to take additional config steps *after* the packages have been installed, add a second `oneshot` script and make it depend on `init-mods-package-install`, add it as a dependency of `init-mods-end`, and add it to the content bundle e.g.
-
-```text
-.
-└── root
-  └── etc
-    └── s6-overlay
-      └── s6-rc.d
-        ├── init-mods-end
-        │  └── dependencies.d
-        │     └── init-mod-universal-mymod-postinstall
-        ├── init-mod-universal-mymod-postinstall
-        │  ├── dependencies.d
-        │  │  └── init-mods-package-install
-        │  ├── run
-        │  ├── type
-        │  └── up
-        └── user
-          └── contents.d
-            └── init-mod-universal-mymod-postinstall
-```
-
-Services will always run last, controlled by their dependency on `init-services`.
-
-### Docker Mod Complex - Sky is the limit
-
-In this repository you will find the `Dockerfile.complex` containing:
-
-```Dockerfile
-## Buildstage ##
-FROM ghcr.io/linuxserver/baseimage-alpine:3.20 as buildstage
-
-RUN \
-  echo "**** install packages ****" && \
-  apk add --no-cache \
-    curl && \
-  echo "**** grab rclone ****" && \
-  mkdir -p /root-layer && \
-  curl -o \
-    /root-layer/rclone.deb -L \
-    "https://downloads.rclone.org/v1.47.0/rclone-v1.47.0-linux-amd64.deb"
-
-# copy local files
-COPY root/ /root-layer/
-
-## Single layer deployed image ##
-FROM scratch
-
-# Add files from buildstage
-COPY --from=buildstage /root-layer/ /
-```
-
-Here we are leveraging a multi stage DockerFile to run custom logic and pull down an rclone deb from the Internet to include in our image layer for distribution. Any amount of logic can be run in this build stage or even multiple build stages as long as the files in the end are combined into a single folder for the COPY command in the final output.
-
-## Getting a Mod to Dockerhub
-
-To publish a Mod to DockerHub you will need the following accounts:
-
-* Github- [https://github.com/join](https://github.com/join)
-* DockerHub- [https://hub.docker.com/signup](https://hub.docker.com/signup)
-
-We recommend using this repository as a template for your first Mod, so in this section we assume the code is finished and we will only concentrate on plugging into GitHub Actions/Dockerhub.
-
-The only code change you need to make to the build logic file `.github/workflows/BuildImage.yml` will be to modify the ENDPOINT to your own image:
-
-```yaml
-  ENDPOINT: "user/endpoint"
-  BRANCH: "master"
-```
-
-User is your Dockerhub user and endpoint is your own custom name (typically the name of the repository where your mod is). You do not need to create this endpoint beforehand, the build logic will push it and create it on first run.
-
-Head over to `https://github.com/user/endpoint/settings/secrets` and click on `New secret`
-
-Add `DOCKERUSER` (your DockerHub username) and `DOCKERPASS` (your DockerHub password or token).
-
-You can create a token by visiting [https://hub.docker.com/settings/security](https://hub.docker.com/settings/security)
-
-GitHub Actions will trigger a build off of your repo when you commit. The image will be pushed to Dockerhub on success. This Dockerhub endpoint is the Mod variable you can use to customize your container now.
-
-## Getting a Mod to GitHub Container Registry
-
-To publish a Mod to GitHub Container Registry you will need the following accounts:
-
-* Github- [https://github.com/join](https://github.com/join)
-
-We recommend using this repository as a template for your first Mod, so in this section we assume the code is finished and we will only concentrate on plugging into GitHub Actions/GitHub Container Registry.
-
-The only code change you need to make to the build logic file `.github/workflows/BuildImage.yml` will be to modify the ENDPOINT to your own image:
-
-```yaml
-  ENDPOINT: "user/endpoint"
-  BRANCH: "master"
-```
-
-`user` is your GitHub user and `endpoint` is your own custom name (typically the name of the repository where your mod is). You do not need to create this endpoint beforehand, the build logic will push it and create it on first run.
-
-Head over to `https://github.com/<user>/<endpoint>/settings/secrets` and click on `New secret`
-
-Add `CR_USER` (your GitHub username) and `CR_PAT` (a personal access token with `read:packages` and `write:packages` scopes).
-
-You can create a personal access token by visiting [https://github.com/settings/tokens](https://github.com/settings/tokens)
-
-GitHub Actions will trigger a build off of your repo when you commit. The image will be pushed to GitHub Container Registry on success. This GitHub Container Registry endpoint is the Mod variable you can use to customize your container now.
-
-## Submitting a PR for a Mod to be added to the official LinuxServer.io repo
-
-* Fork this repo, checkout the `template` branch.
-* Edit the `Dockerfile` for the mod. `Dockerfile.complex` is only an example and included for reference; it should be deleted when done.
-* Ensure you set the `maintainer` label to your GitHub username, this allows us to @ you if there are breaking changes that affect or will affect your mod in the future.
-* Inspect the `root` folder contents. Edit, add and remove as necessary.
-* After all init scripts and services are created, run `find ./ -path "./.git" -prune -o ( -name "run" -o -name "finish" -o -name "check" ) -not -perm -u=x,g=x,o=x -print -exec chmod +x {} +` to fix permissions.
-* Edit the readme with pertinent info.
-* Finally edit the `.github/workflows/BuildImage.yml`. Customize the vars for `BASEIMAGE` and `MODNAME`. Set the versioning logic and `MULTI_ARCH` if needed.
-* Ask the team to create a new branch named `<baseimagename>-<modname>` in this repo. Baseimage should be the name of the image the mod will be applied to. The new branch will be based on the [template branch](https://github.com/linuxserver/docker-mods/tree/template).
-* Submit PR against the branch created by the team.
-* Make sure that the commits in the PR are squashed.
-* Also make sure that the commit and PR titles are in the format of `<imagename>: <modname> <very brief description like "initial release" or "update">`. Detailed description and further info should be provided in the body (ie. `code-server: python2 add python-pip`).
-
-## Appendix
-
-### File encoding
-
-s6 init files must be encoded in plain `UTF-8`, and not `UTF-8 with BOM`. You can remove the BOM using your IDE if necessary.
-
-### Inspecting mods
-
-To inspect the file contents of external Mods dive is a great CLI tool:
-
-[https://github.com/wagoodman/dive](https://github.com/wagoodman/dive)
-
-Basic usage:
-
-#### With Docker
-
-```bash
-docker run --rm -it \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    wagoodman/dive:latest <Image Name>
-```
-
-#### Without Docker
-
-```bash
-dive <Image Name>
-```
+Several mods are separated with `|`, e.g.
+`linuxserver/mods:universal-package-install|ghcr.io/joly0/docker-mods:orcaslicer-mcp`.
+
+On the first start the mod downloads the OrcaSlicer MCP build (about 140 MB)
+and the MCP server; later starts reuse them from `/config/.cache/orcaslicer-mcp`.
+
+1. **First start with a new `/config` only:** finish OrcaSlicer's setup wizard
+   in the browser, then restart the container. OrcaSlicer writes its config
+   during the wizard and the mod enables the API from the next start.
+2. Get the MCP server's bearer token from
+   `/config/.config/orcaslicer-mcp/server-token` (on Unraid e.g.
+   `/mnt/user/appdata/orcaslicer/.config/orcaslicer-mcp/server-token`), or set
+   your own with `ORCA_MCP_SERVER_TOKEN`.
+3. Connect your MCP client to `http://<server-ip>:13131/mcp` with the header
+   `Authorization: Bearer <token>`.
+
+   **Claude Code:**
+   ```
+   claude mcp add --transport http orcaslicer http://<server-ip>:13131/mcp \
+     --header "Authorization: Bearer <token>"
+   ```
+   or in a project's `.mcp.json`:
+   ```json
+   {
+     "mcpServers": {
+       "orcaslicer": {
+         "type": "http",
+         "url": "http://<server-ip>:13131/mcp",
+         "headers": { "Authorization": "Bearer <token>" }
+       }
+     }
+   }
+   ```
+   Other clients that support streamable HTTP servers take the same URL and
+   header.
+
+The OrcaSlicer API token is read from OrcaSlicer's config on every request,
+so the MCP server needs no further setup, and regenerating the token in
+**Preferences > Remote API** takes effect without a restart.
+
+### Optional variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ORCA_MCP_VERSION` | `latest` | Release tag of the [OrcaSlicer MCP build](https://github.com/MaxEllis/OrcaSlicer/releases), e.g. `v2.4.2-mcp.13`. `latest` checks for a new release at every start. |
+| `ORCA_MCP_SERVER` | `true` | `false`: do not run the MCP server in the container (e.g. when you run `uvx orcaslicer-mcp` on your PC, see below). |
+| `ORCA_MCP_SERVER_PORT` | `13131` | Port of the MCP server in the container. |
+| `ORCA_MCP_SERVER_TOKEN` | generated | Bearer token MCP clients must send. Without it the mod generates one and keeps it in `/config/.config/orcaslicer-mcp/server-token`. |
+| `ORCA_MCP_SERVER_VERSION` | latest | Version of [orcaslicer-mcp](https://pypi.org/project/orcaslicer-mcp/) on PyPI, e.g. `0.1.17`. Without it the server is updated at every start. |
+| `ORCA_API_TOKEN` | OrcaSlicer's | Sets the OrcaSlicer API token (32 hex characters, as OrcaSlicer generates). |
+| `ORCA_API_PORT` | `13130` | Port of OrcaSlicer's API. |
+| `ORCA_API_BIND_LAN` | unchanged | `true`: OrcaSlicer's API listens on all interfaces instead of localhost (the **Allow LAN access** checkbox). Only needed for an MCP server outside the container. |
+| `GITHUB_TOKEN` | (unset) | Used for the GitHub release lookup, in case the anonymous rate limit is hit. |
+
+orcaslicer-mcp's own variables, such as `ORCA_MCP_ALLOW_KEYS`,
+`ORCA_PRINTER_URL` and `ORCA_PRINTER_API_KEY`, can be set on the container
+and reach the MCP server unchanged. See the
+[orcaslicer-mcp README](https://github.com/MaxEllis/orcaslicer-mcp#readme) for
+what they do.
+
+### MCP server on your PC instead
+
+To run orcaslicer-mcp on the machine of your MCP client (stdio, via `uvx`)
+instead of in the container, set `ORCA_MCP_SERVER=false`,
+`ORCA_API_BIND_LAN=true` and map port `13130`, then follow the
+[orcaslicer-mcp quickstart](https://github.com/MaxEllis/orcaslicer-mcp#quickstart)
+with `ORCA_API_URL=http://<server-ip>:13130` and the token from OrcaSlicer's
+**Preferences > Remote API** (or the one you set with `ORCA_API_TOKEN`).
+
+## What it does at container start
+
+- downloads the OrcaSlicer MCP build for the container's architecture (x64 or
+  aarch64), checks it against the release's `SHA256SUMS.txt` and unpacks it
+  into `/config/.cache/orcaslicer-mcp/app`, once per version; older versions
+  are removed
+- points `/opt/orcaslicer`, which the image's autostart and menu start, at
+  that build; the image's own OrcaSlicer stays in `/opt/orcaslicer-stock`
+- if GitHub cannot be reached, uses the build already in `/config`, and the
+  stock OrcaSlicer if there is none
+- enables OrcaSlicer's Remote API in `/config/.config/OrcaSlicer/OrcaSlicer.conf`
+  and applies `ORCA_API_PORT`, `ORCA_API_BIND_LAN` and `ORCA_API_TOKEN`
+- installs orcaslicer-mcp with [uv](https://github.com/astral-sh/uv) (bundled
+  in the mod) into `/config/.cache/orcaslicer-mcp/server`, using the image's
+  Python, or a downloaded one if it has none recent enough
+- runs the MCP server as a service on `ORCA_MCP_SERVER_PORT`, behind the bearer
+  token
+
+## Notes
+
+- Update OrcaSlicer by restarting the container (with `ORCA_MCP_VERSION=latest`),
+  never from inside the app: the in-app updater offers stock OrcaSlicer, which
+  has no API. The MCP builds switch that updater off themselves.
+- The MCP endpoint is plain HTTP with a bearer token. Keep it on your LAN and
+  do not forward it to the internet. Anyone with the token can control the
+  slicer; orcaslicer-mcp still refuses to change G-code templates,
+  post-processing scripts and printer connection settings unless you allow
+  them with `ORCA_MCP_ALLOW_KEYS`.
+- The OrcaSlicer MCP build follows upstream OrcaSlicer with a delay, so it can
+  be a version behind the image's stock OrcaSlicer. Both use the same profile
+  folder.
+- To go back to stock OrcaSlicer, remove the mod and recreate the container.
+  `/config/.cache/orcaslicer-mcp` can then be deleted.
