@@ -26,6 +26,8 @@ Several mods are separated with `|`, e.g.
 
 On the first start the mod downloads the OrcaSlicer MCP build (about 140 MB)
 and the MCP server; later starts reuse them from `/config/.cache/orcaslicer-mcp`.
+On a slow connection the first start can take several minutes; restarting the
+container meanwhile does not lose the download, it continues where it stopped.
 
 1. **First start with a new `/config` only:** finish OrcaSlicer's setup wizard
    in the browser, then restart the container. OrcaSlicer writes its config
@@ -95,7 +97,8 @@ with `ORCA_API_URL=http://<server-ip>:13130` and the token from OrcaSlicer's
 - downloads the OrcaSlicer MCP build for the container's architecture (x64 or
   aarch64), checks it against the release's `SHA256SUMS.txt` and unpacks it
   into `/config/.cache/orcaslicer-mcp/app`, once per version; older versions
-  are removed
+  are removed. A download cut short by a container stop or restart resumes at
+  the next start instead of starting over
 - points `/opt/orcaslicer`, which the image's autostart and menu start, at
   that build; the image's own OrcaSlicer stays in `/opt/orcaslicer-stock`
 - if GitHub cannot be reached, uses the build already in `/config`, and the

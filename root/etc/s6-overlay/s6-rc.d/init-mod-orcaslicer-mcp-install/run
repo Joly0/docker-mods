@@ -66,13 +66,23 @@ if [ -n "$TAG" ] && [ ! -x "$CACHE/app/$TAG/AppRun" ]; then
     ASSET="OrcaSlicer-MCP-${TAG#v}-linux-$ARCH.AppImage"
     URL=$(jq -r --arg n "$ASSET" '.assets[] | select(.name == $n) | .browser_download_url' <<<"$RELEASE")
     SUMS=$(jq -r '.assets[] | select(.name == "SHA256SUMS.txt") | .browser_download_url' <<<"$RELEASE")
+    # A download cut short by a container stop resumes at the next start
+    # instead of starting over.
     TMP="$CACHE/download"
-    rm -rf "$TMP" && mkdir -p "$TMP"
+    mkdir -p "$TMP"
+    [ "$(cat "$TMP/asset" 2>/dev/null)" = "$ASSET" ] || rm -f "$TMP/orca.AppImage.part"
+    echo "$ASSET" > "$TMP/asset"
+    rm -rf "$TMP/orca.AppImage" "$TMP/SHA256SUMS.txt" "$TMP/squashfs-root"
     if [ -z "$URL" ]; then
         log "WARNING: release $TAG has no $ASSET"
     else
-        log "downloading OrcaSlicer MCP build $TAG"
-        if curl -fsSL --retry 2 -o "$TMP/orca.AppImage" "$URL"; then
+        if [ -s "$TMP/orca.AppImage.part" ]; then
+            log "resuming download of OrcaSlicer MCP build $TAG ($(du -m "$TMP/orca.AppImage.part" | cut -f1) MB already there)"
+        else
+            log "downloading OrcaSlicer MCP build $TAG (about 140 MB)"
+        fi
+        if curl -fsSL --retry 5 --retry-delay 5 -C - -o "$TMP/orca.AppImage.part" "$URL" \
+            && mv "$TMP/orca.AppImage.part" "$TMP/orca.AppImage"; then
             ok=1
             if [ -n "$SUMS" ] && curl -fsSL -o "$TMP/SHA256SUMS.txt" "$SUMS"; then
                 want_sum=$(awk -v n="$ASSET" '$2 == n || $2 == "*"n {print $1}' "$TMP/SHA256SUMS.txt")
@@ -97,10 +107,17 @@ if [ -n "$TAG" ] && [ ! -x "$CACHE/app/$TAG/AppRun" ]; then
                 fi
             fi
         else
-            log "WARNING: download of $ASSET failed"
+            rc=$?
+            # 33: the server refused the resume range, so the partial file is unusable.
+            [ "$rc" = 33 ] && rm -f "$TMP/orca.AppImage.part"
+            log "WARNING: download of $ASSET failed (curl exit $rc), it resumes at the next start"
         fi
     fi
-    rm -rf "$TMP"
+    if [ -x "$CACHE/app/$TAG/AppRun" ]; then
+        rm -rf "$TMP"
+    else
+        rm -rf "$TMP/orca.AppImage" "$TMP/SHA256SUMS.txt" "$TMP/squashfs-root"
+    fi
     if [ ! -x "$CACHE/app/$TAG/AppRun" ]; then
         old=$(ls -t "$CACHE/app" 2>/dev/null | grep -vx "$TAG" | head -n1)
         if [ -n "$old" ]; then
