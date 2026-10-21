@@ -138,6 +138,13 @@ for d in "$CACHE/app"/*; do
 done
 touch "$CACHE/app/$TAG"
 
+# The image forces the X11 GDK backend in its stock AppRun (UI rendering is
+# broken under Wayland); the MCP build needs the same. Also patches builds
+# cached before this was added.
+if ! grep -q '^export GDK_BACKEND=x11$' "$CACHE/app/$TAG/AppRun"; then
+    sed -i "1a export GDK_BACKEND=x11" "$CACHE/app/$TAG/AppRun"
+fi
+
 # /opt/orcaslicer is where the image's autostart and menu start OrcaSlicer.
 if [ -d "$APP" ] && [ ! -L "$APP" ]; then
     rm -rf "$STOCK"
